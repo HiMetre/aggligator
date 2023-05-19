@@ -120,7 +120,7 @@ pub struct ClientCli {
     /// TCP server name or IP addresses and port number.
     #[arg(long)]
     tcp: Vec<String>,
-    /// the socket connections count that one interface can use，max:1024.
+    /// the socket connections count that one interface can use，max: 255.
     #[arg(long, short = 'c')]
     count: Option<u8>,
     /// Bluetooth RFCOMM server address.

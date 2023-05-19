@@ -181,9 +181,6 @@ impl TcpConnector {
             if tmp > 0 {
                 count = tmp;
             }
-            else if tmp > 1024 {
-                count = 1024;
-            }
         }
         
         let this = Self { hosts, ip_version: IpVersion::Both, resolve_interval: Duration::from_secs(10), link_count: count };
