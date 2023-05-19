@@ -68,10 +68,10 @@ use aggligator::alc::Stream;
 /// ```
 pub async fn tls_connect(
     target: impl IntoIterator<Item = String>, default_port: u16, tls_client_cfg: Arc<ClientConfig>,
-    server_name: ServerName,
+    server_name: ServerName, link_count: Option<u8>
 ) -> Result<Stream> {
     let mut connector = Connector::wrapped(TlsClient::new(tls_client_cfg, server_name));
-    connector.add(TcpConnector::new(target, default_port).await?);
+    connector.add(TcpConnector::new(target, default_port, link_count).await?);
     let ch = connector.channel().unwrap().await?;
     Ok(ch.into_stream())
 }

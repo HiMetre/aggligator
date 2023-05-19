@@ -45,16 +45,16 @@ use aggligator::alc::Stream;
 ///
 /// #[tokio::main]
 /// async fn main() -> std::io::Result<()> {
-///     let stream = tcp_connect(["server".to_string()], 5900).await?;
+///     let stream = tcp_connect(["server".to_string()], 5900, 1).await?;
 ///
 ///     // use the connection
 ///
 ///     Ok(())
 /// }
 /// ```
-pub async fn tcp_connect(target: impl IntoIterator<Item = String>, default_port: u16) -> Result<Stream> {
+pub async fn tcp_connect(target: impl IntoIterator<Item = String>, default_port: u16, link_count: Option<u8>) -> Result<Stream> {
     let mut connector = Connector::new();
-    connector.add(TcpConnector::new(target, default_port).await?);
+    connector.add(TcpConnector::new(target, default_port, link_count).await?);
     let ch = connector.channel().unwrap().await?;
     Ok(ch.into_stream())
 }

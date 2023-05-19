@@ -65,6 +65,10 @@ impl IpVersion {
 pub struct TcpLinkTag {
     /// Local interface name.
     pub interface: Vec<u8>,
+
+    /// real Local interface name.
+    pub real_interface: Vec<u8>,
+
     /// Remote address.
     pub remote: SocketAddr,
     /// Link direction.
@@ -83,8 +87,8 @@ impl fmt::Display for TcpLinkTag {
 
 impl TcpLinkTag {
     /// Creates a new link tag for a TCP link.
-    pub fn new(interface: &[u8], remote: SocketAddr, direction: Direction) -> Self {
-        Self { interface: interface.to_vec(), remote, direction }
+    pub fn new(interface: &[u8], real_interface: &[u8],remote: SocketAddr, direction: Direction) -> Self {
+        Self { interface: interface.to_vec(), real_interface: real_interface.to_vec(),remote, direction }
     }
 }
 
@@ -136,6 +140,7 @@ pub struct TcpConnector {
     hosts: Vec<String>,
     ip_version: IpVersion,
     resolve_interval: Duration,
+    link_count: u8,
 }
 
 impl fmt::Display for TcpConnector {
@@ -158,7 +163,7 @@ impl TcpConnector {
     ///
     /// Host name resolution is retried periodically, thus DNS updates will be taken
     /// into account without the need to recreate this transport.
-    pub async fn new(hosts: impl IntoIterator<Item = String>, default_port: u16) -> Result<Self> {
+    pub async fn new(hosts: impl IntoIterator<Item = String>, default_port: u16, link_count: Option <u8>) -> Result<Self> {
         let mut hosts: Vec<_> = hosts.into_iter().collect();
 
         if hosts.is_empty() {
@@ -171,7 +176,17 @@ impl TcpConnector {
             }
         }
 
-        let this = Self { hosts, ip_version: IpVersion::Both, resolve_interval: Duration::from_secs(10) };
+        let mut count = 1_u8;
+        if let Some(tmp) = link_count {
+            if tmp > 0 {
+                count = tmp;
+            }
+            else if tmp > 1024 {
+                count = 1024;
+            }
+        }
+        
+        let this = Self { hosts, ip_version: IpVersion::Both, resolve_interval: Duration::from_secs(10), link_count: count };
 
         let addrs = this.resolve().await;
         if addrs.is_empty() {
@@ -274,8 +289,16 @@ impl ConnectingTransport for TcpConnector {
             let mut tags: HashSet<LinkTagBox> = HashSet::new();
             for addr in self.resolve().await {
                 for iface in Self::interface_names_for_target(&interfaces, addr) {
-                    let tag = TcpLinkTag::new(&iface, addr, Direction::Outgoing);
-                    tags.insert(Box::new(tag.clone()));
+                    let mut count = self.link_count;
+                    if count == 0 {
+                        count = 1;
+                    }
+                    for i in 0..count {
+                        let mut show_name= std::str::from_utf8(&iface).unwrap().to_string();
+                        show_name.push_str(& format!("_{}",i));
+                        let tag = TcpLinkTag::new(show_name.as_bytes(), &iface, addr, Direction::Outgoing);
+                        tags.insert(Box::new(tag.clone()));
+                    }
                 }
             }
 
@@ -300,7 +323,7 @@ impl ConnectingTransport for TcpConnector {
             IpAddr::V6(_) => TcpSocket::new_v6(),
         }?;
 
-        Self::bind_socket_to_interface(&socket, &tag.interface, tag.remote.ip())?;
+        Self::bind_socket_to_interface(&socket, &tag.real_interface, tag.remote.ip())?;
 
         let stream = socket.connect(tag.remote).await?;
         let _ = stream.set_nodelay(true);
@@ -473,7 +496,8 @@ impl AcceptingTransport for TcpAcceptor {
 
             // Build tag.
             tracing::debug!("Accepted TCP connection from {remote} on {}", String::from_utf8_lossy(&interface));
-            let tag = TcpLinkTag { interface, remote, direction: Direction::Incoming };
+            let real_interface = interface.clone();
+            let tag = TcpLinkTag { interface, real_interface, remote, direction: Direction::Incoming };
 
             // Configure socket.
             let _ = socket.set_nodelay(true);

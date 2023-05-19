@@ -120,6 +120,9 @@ pub struct ClientCli {
     /// TCP server name or IP addresses and port number.
     #[arg(long)]
     tcp: Vec<String>,
+    /// the socket connections count that one interface can use，max:1024.
+    #[arg(long, short = 'c')]
+    count: Option<u8>,
     /// Bluetooth RFCOMM server address.
     #[cfg(feature = "rfcomm")]
     #[arg(long)]
@@ -140,7 +143,7 @@ impl ClientCli {
         let mut targets = Vec::new();
 
         let tcp_connector = if !self.tcp.is_empty() {
-            match TcpConnector::new(self.tcp.clone(), TCP_PORT).await {
+            match TcpConnector::new(self.tcp.clone(), TCP_PORT, self.count).await {
                 Ok(mut tcp) => {
                     tcp.set_ip_version(IpVersion::from_only(self.ipv4, self.ipv6)?);
                     targets.push(tcp.to_string());
