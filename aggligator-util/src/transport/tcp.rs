@@ -292,6 +292,7 @@ impl ConnectingTransport for TcpConnector {
                     }
                     for i in 0..count {
                         let mut show_name= std::str::from_utf8(&iface).unwrap().to_string();
+                        //show_name.push_str(& format!("_{}({})",i,addr.to_string()));
                         show_name.push_str(& format!("_{}",i));
                         let tag = TcpLinkTag::new(show_name.as_bytes(), &iface, addr, Direction::Outgoing);
                         tags.insert(Box::new(tag.clone()));
@@ -299,7 +300,7 @@ impl ConnectingTransport for TcpConnector {
                 }
             }
 
-            tx.send_if_modified(|v| {
+            tx.send_if_modified(|v: &mut HashSet<Box<dyn LinkTag>>| {
                 if *v != tags {
                     *v = tags;
                     true
@@ -329,35 +330,36 @@ impl ConnectingTransport for TcpConnector {
         Ok(IoBox::new(rh, wh))
     }
 
-    async fn link_filter(&self, new: &Link<LinkTagBox>, existing: &[Link<LinkTagBox>]) -> bool {
-        let Some(new_tag) = new.tag().as_any().downcast_ref::<TcpLinkTag>() else { return true };
+    async fn link_filter(&self, _: &Link<LinkTagBox>, _: &[Link<LinkTagBox>]) -> bool {
+        true
+        // let Some(new_tag) = new.tag().as_any().downcast_ref::<TcpLinkTag>() else { return true };
 
-        let intro = format!(
-            "Judging {} TCP link {} {} ({}) on {}",
-            new.direction(),
-            match new.direction() {
-                Direction::Incoming => "from",
-                Direction::Outgoing => "to",
-            },
-            new_tag.remote,
-            String::from_utf8_lossy(new.remote_user_data()),
-            String::from_utf8_lossy(&new_tag.interface)
-        );
+        // let intro = format!(
+        //     "Judging {} TCP link {} {} ({}) on {}",
+        //     new.direction(),
+        //     match new.direction() {
+        //         Direction::Incoming => "from",
+        //         Direction::Outgoing => "to",
+        //     },
+        //     new_tag.remote,
+        //     String::from_utf8_lossy(new.remote_user_data()),
+        //     String::from_utf8_lossy(&new_tag.interface)
+        // );
 
-        match existing.iter().find(|link| {
-            let Some(tag) = link.tag().as_any().downcast_ref::<TcpLinkTag>() else { return false };
-            tag.interface == new_tag.interface && link.remote_user_data() == new.remote_user_data()
-        }) {
-            Some(other) => {
-                let other_tag = other.tag().as_any().downcast_ref::<TcpLinkTag>().unwrap();
-                tracing::debug!("{intro} => link {} is redundant, rejecting.", other_tag.remote);
-                false
-            }
-            None => {
-                tracing::debug!("{intro} => accepted.");
-                true
-            }
-        }
+        // match existing.iter().find(|link| {
+        //     let Some(tag) = link.tag().as_any().downcast_ref::<TcpLinkTag>() else { return false };
+        //     tag.interface == new_tag.interface && link.remote_user_data() == new.remote_user_data()
+        // }) {
+        //     Some(other) => {
+        //         let other_tag = other.tag().as_any().downcast_ref::<TcpLinkTag>().unwrap();
+        //         tracing::debug!("{intro} => link {} is redundant, rejecting.", other_tag.remote);
+        //         false
+        //     }
+        //     None => {
+        //         tracing::debug!("{intro} => accepted.");
+        //         true
+        //     }
+        // }
     }
 }
 
