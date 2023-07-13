@@ -224,7 +224,7 @@ impl ConnectingTransport for TcpConnector {
 
             let mut tags: HashSet<LinkTagBox> = HashSet::new();
             for addr in self.resolve().await {
-                for iface in Self::interface_names_for_target(&interfaces, addr) {
+                for iface in interface_names_for_target(&interfaces, addr) {
                     let mut count = self.link_count;
                     if count == 0 {
                         count = 1;
@@ -261,7 +261,7 @@ impl ConnectingTransport for TcpConnector {
         }?;
 
 
-        Self::bind_socket_to_interface(&socket, &tag.real_interface, tag.remote.ip())?;
+        bind_socket_to_interface(&socket, &tag.real_interface, tag.remote.ip())?;
 
         let stream = socket.connect(tag.remote).await?;
         let _ = stream.set_nodelay(true);
