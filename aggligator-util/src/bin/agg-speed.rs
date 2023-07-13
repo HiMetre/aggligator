@@ -31,6 +31,7 @@ use aggligator_util::{
     transport::{
         tcp::{IpVersion, TcpAcceptor, TcpConnector},
         tls::{TlsClient, TlsServer},
+        websocket::{WebSocketAcceptor, WebSocketConnector},
         AcceptorBuilder, ConnectorBuilder, LinkTagBox,
     },
 };
@@ -42,6 +43,9 @@ use aggligator_util::transport::rfcomm_profile::{RfcommProfileAcceptor, RfcommPr
 
 const TCP_PORT: u16 = 5700;
 const DUMP_BUFFER: usize = 8192;
+
+const WEBSOCKET_PORT: u16 = 8080;
+const WEBSOCKET_PATH: &str = "/agg-speed";
 
 #[cfg(feature = "rfcomm")]
 const RFCOMM_CHANNEL: u8 = 20;
@@ -182,6 +186,12 @@ pub struct ClientCli {
     /// the socket connections count that one interface can use，max: 255.
     #[arg(long, short = 'c')]
     count: Option<u8>,
+    /// WebSocket hosts or URLs.
+    ///
+    /// Default server port number is 8080 and path is /agg-speed.
+    #[arg(long)]
+    websocket: Vec<String>,
+
     /// Bluetooth RFCOMM server address.
     #[cfg(feature = "rfcomm")]
     #[arg(long, value_parser=parse_rfcomm)]
@@ -224,11 +234,13 @@ impl ClientCli {
 
         let mut connector = builder.build();
         let mut targets = Vec::new();
+        let ip_version = IpVersion::from_only(self.ipv4, self.ipv6)?;
 
         if !self.tcp.is_empty() {
             let mut tcp_connector =
                 TcpConnector::new(self.tcp.clone(), TCP_PORT, self.count).await.context("cannot resolve TCP target")?;
-            tcp_connector.set_ip_version(IpVersion::from_only(self.ipv4, self.ipv6)?);
+            tcp_connector.set_ip_version(ip_version);
+
             targets.push(tcp_connector.to_string());
             connector.add(tcp_connector);
         }
@@ -247,6 +259,21 @@ impl ClientCli {
                 .context("RFCOMM profile connector failed")?;
             targets.push(addr.to_string());
             connector.add(rfcomm_profile_connector);
+        }
+
+        if !self.websocket.is_empty() {
+            let websockets = self.websocket.iter().map(|url| {
+                let mut url = url.clone();
+                if !url.starts_with("ws") {
+                    url = format!("ws://{url}:{WEBSOCKET_PORT}{WEBSOCKET_PATH}");
+                }
+                url
+            });
+            let mut ws_connector =
+                WebSocketConnector::new(websockets).await.context("cannot resolve WebSocket target")?;
+            ws_connector.set_ip_version(ip_version);
+            targets.push(ws_connector.to_string());
+            connector.add(ws_connector);
         }
 
         if targets.is_empty() {
@@ -400,6 +427,9 @@ pub struct ServerCli {
     #[cfg(feature = "rfcomm")]
     #[arg(long, default_value_t = RFCOMM_CHANNEL)]
     rfcomm: u8,
+    /// WebSocket (HTTP) port to listen on.
+    #[arg(long, default_value_t = WEBSOCKET_PORT)]
+    websocket: u16,
 }
 
 impl ServerCli {
@@ -453,6 +483,19 @@ impl ServerCli {
             }
             Err(err) => eprintln!("Cannot listen on RFCOMM profile {RFCOMM_UUID}: {err}"),
         }
+
+        let (wsa, router) = WebSocketAcceptor::new(WEBSOCKET_PATH);
+        acceptor.add(wsa);
+        ports.push(format!("WebSocket {}", self.websocket));
+        let websocket_addr = SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), self.websocket);
+        tokio::spawn(async move {
+            if let Err(err) = axum_server::bind(websocket_addr)
+                .serve(router.into_make_service_with_connect_info::<SocketAddr>())
+                .await
+            {
+                eprintln!("Cannot listen on WebSocket {}: {err}", websocket_addr);
+            }
+        });
 
         if ports.is_empty() {
             bail!("No listening transports.");

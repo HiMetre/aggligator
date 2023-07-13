@@ -3,38 +3,35 @@
 use async_trait::async_trait;
 use futures::{future, future::BoxFuture, pin_mut, stream::FuturesUnordered, FutureExt, StreamExt};
 use std::{
-    fmt::{self},
+    fmt,
     future::IntoFuture,
     io::{Error, ErrorKind, Result},
     sync::{Arc, Weak},
     time::Duration,
 };
 use tokio::{
-    io::{AsyncRead, AsyncWrite},
-    sync::{broadcast, mpsc, oneshot, watch, Mutex, RwLock},
+    sync::{broadcast, mpsc, oneshot, watch, Mutex, OwnedSemaphorePermit, RwLock, Semaphore},
     time::{sleep_until, Instant},
 };
 
 use super::{
-    BoxControl, BoxLink, BoxLinkError, BoxListener, BoxServer, BoxTask, IoBox, LinkError, LinkTag, LinkTagBox,
+    BoxControl, BoxLink, BoxLinkError, BoxListener, BoxServer, BoxTask, LinkError, LinkTag, LinkTagBox,
+    StreamBox, TxRxBox,
 };
 use aggligator::{alc::Channel, Cfg, Server};
 
-/// An accepted incoming IO stream.
-pub struct AcceptedIoBox {
-    /// IO stream.
-    pub io: IoBox,
+/// An accepted incoming stream.
+pub struct AcceptedStreamBox {
+    /// Stream.
+    pub stream: StreamBox,
     /// Link tag.
     pub tag: LinkTagBox,
 }
 
-impl AcceptedIoBox {
+impl AcceptedStreamBox {
     /// Creates a new instance.
-    pub fn new(
-        read: impl AsyncRead + Send + Sync + 'static, write: impl AsyncWrite + Send + Sync + 'static,
-        tag: impl LinkTag,
-    ) -> Self {
-        Self { io: IoBox::new(read, write), tag: Box::new(tag) }
+    pub fn new(stream: StreamBox, tag: impl LinkTag) -> Self {
+        Self { stream, tag: Box::new(tag) }
     }
 }
 
@@ -48,7 +45,7 @@ pub trait AcceptingTransport: Send + Sync + 'static {
     ///
     /// This functions listens for incoming connections, accepts them and
     /// sends the read stream, write stream and link tag over the provided channel.
-    async fn listen(&self, tx: mpsc::Sender<AcceptedIoBox>) -> Result<()>;
+    async fn listen(&self, tx: mpsc::Sender<AcceptedStreamBox>) -> Result<()>;
 
     /// Checks whether a new link can be added given existing links.
     async fn link_filter(&self, _new: &BoxLink, _existing: &[BoxLink]) -> bool {
@@ -67,8 +64,8 @@ pub trait AcceptingWrapper: Send + Sync + fmt::Debug + 'static {
     /// Name of the wrapper.
     fn name(&self) -> &str;
 
-    /// Wraps the incoming IO stream.
-    async fn wrap(&self, io: IoBox) -> Result<IoBox>;
+    /// Wraps the incoming stream.
+    async fn wrap(&self, io: StreamBox) -> Result<StreamBox>;
 }
 
 type BoxAcceptingWrapper = Box<dyn AcceptingWrapper>;
@@ -77,6 +74,7 @@ struct AcceptingTransportPack {
     transport: ArcAcceptingTransport,
     result_tx: oneshot::Sender<Result<()>>,
     remove_rx: oneshot::Receiver<()>,
+    _permit: OwnedSemaphorePermit,
 }
 
 /// Builds a customized [`Acceptor`].
@@ -135,6 +133,7 @@ impl AcceptorBuilder {
             task_cfg,
             transport_tx,
             transports_present_rx,
+            transports_being_added: Arc::new(Semaphore::new(Semaphore::MAX_PERMITS)),
             error_rx,
             active_transports,
             no_transport_timeout,
@@ -151,6 +150,7 @@ pub struct Acceptor {
     task_cfg: TaskCfgFn,
     transport_tx: mpsc::UnboundedSender<AcceptingTransportPack>,
     transports_present_rx: watch::Receiver<bool>,
+    transports_being_added: Arc<Semaphore>,
     active_transports: Arc<RwLock<Vec<Weak<dyn AcceptingTransport>>>>,
     error_rx: broadcast::Receiver<BoxLinkError>,
     no_transport_timeout: Duration,
@@ -190,10 +190,21 @@ impl Acceptor {
         let (result_tx, result_rx) = oneshot::channel();
         let (remove_tx, remove_rx) = oneshot::channel();
 
-        let pack = AcceptingTransportPack { transport: Arc::new(transport), result_tx, remove_rx };
+        let pack = AcceptingTransportPack {
+            transport: Arc::new(transport),
+            result_tx,
+            remove_rx,
+            _permit: self.transports_being_added.clone().try_acquire_owned().unwrap(),
+        };
         let _ = self.transport_tx.send(pack);
 
         AcceptingTransportHandle { name, result_rx, remove_tx }
+    }
+
+    /// Returns whether no transports are present.
+    pub fn is_empty(&self) -> bool {
+        !*self.transports_present_rx.borrow()
+            && self.transports_being_added.available_permits() == Semaphore::MAX_PERMITS
     }
 
     /// Waits for an incoming connection and accepts it.
@@ -309,6 +320,9 @@ impl Acceptor {
                     active_transports.retain(|at| at.strong_count() > 0);
                     active_transports.push(Arc::downgrade(&transport_pack.transport));
 
+                    // Notify of transport availability.
+                    transports_present_tx.send_replace(true);
+
                     // Start transport task.
                     transport_tasks.push(Self::transport_task(
                         server.clone(),
@@ -328,7 +342,7 @@ impl Acceptor {
         server: BoxServer, transport: AcceptingTransportPack, link_error_tx: broadcast::Sender<BoxLinkError>,
         wrappers: Arc<Vec<BoxAcceptingWrapper>>,
     ) {
-        let AcceptingTransportPack { transport, result_tx, mut remove_rx } = transport;
+        let AcceptingTransportPack { transport, result_tx, mut remove_rx, _permit: _ } = transport;
 
         let (tx, mut rx) = mpsc::channel(128);
         let mut listener = transport.listen(tx);
@@ -337,7 +351,7 @@ impl Acceptor {
 
         let res = loop {
             // Accept incoming transport connection.
-            let AcceptedIoBox { io: mut io_box, tag } = tokio::select! {
+            let AcceptedStreamBox { stream: mut stream_box, tag } = tokio::select! {
                 Some(accepted) = rx.recv() => accepted,
                 Some(()) = accepting_tasks.next() => continue,
                 res = &mut listener => break res,
@@ -359,8 +373,8 @@ impl Acceptor {
                     let name = wrapper.name();
                     tracing::debug!("wrapping tag {tag} in {name}");
 
-                    match wrapper.wrap(io_box).await {
-                        Ok(wrapped) => io_box = wrapped,
+                    match wrapper.wrap(stream_box).await {
+                        Ok(wrapped) => stream_box = wrapped,
                         Err(err) => {
                             tracing::debug!("wrapping tag {tag} in {name} failed: {err}");
                             let _ = link_error_tx.send(BoxLinkError::incoming(&tag, err));
@@ -372,8 +386,8 @@ impl Acceptor {
                 // Add link to aggregated connection.
                 tracing::debug!("adding link for tag {tag} to connection");
                 let user_data = tag.user_data();
-                let IoBox { read, write } = io_box;
-                let link = match server.add_incoming_io(read, write, tag.clone(), &user_data).await {
+                let TxRxBox { tx, rx } = stream_box.into_tx_rx();
+                let link = match server.add_incoming(tx, rx, tag.clone(), &user_data).await {
                     Ok(link) => link,
                     Err(err) => {
                         tracing::debug!("adding link for tag {tag} to connection failed: {err}");
