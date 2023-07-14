@@ -45,6 +45,8 @@ static NAME: &str = "websocket";
 pub struct OutgoingWebSocketLinkTag {
     /// Local interface name.
     pub interface: Vec<u8>,
+    /// real Local interface name.
+    pub real_interface: Vec<u8>,
     /// Remote socket address.
     pub remote: SocketAddr,
     /// Remote URL.
@@ -100,6 +102,7 @@ pub struct WebSocketConnector {
     resolve_interval: Duration,
     connector: Option<Connector>,
     web_socket_config: Option<WebSocketConfig>,
+    link_count: u8,
 }
 
 impl fmt::Debug for WebSocketConnector {
@@ -133,7 +136,7 @@ impl WebSocketConnector {
     ///
     /// Host name resolution is retried periodically, thus DNS updates will be taken
     /// into account without the need to recreate this transport.
-    pub async fn new(urls: impl IntoIterator<Item = impl AsRef<str>>) -> Result<Self> {
+    pub async fn new(urls: impl IntoIterator<Item = impl AsRef<str>>, link_count: Option <u8>) -> Result<Self> {
         let urls = urls
             .into_iter()
             .map(|url| url.as_ref().parse::<Url>())
@@ -152,12 +155,20 @@ impl WebSocketConnector {
             }
         }
 
+        let mut count = 1_u8;
+        if let Some(tmp) = link_count {
+            if tmp > 0 {
+                count = tmp;
+            }
+        }
+
         let this = Self {
             urls,
             ip_version: IpVersion::Both,
             resolve_interval: Duration::from_secs(10),
             connector: None,
             web_socket_config: None,
+            link_count: count,
         };
 
         let addrs = this.resolve().await;
@@ -220,13 +231,24 @@ impl ConnectingTransport for WebSocketConnector {
             for (url, addrs) in self.resolve().await {
                 for addr in addrs {
                     for interface in interface_names_for_target(&interfaces, addr) {
-                        let tag = OutgoingWebSocketLinkTag {
-                            interface,
-                            remote: addr,
-                            url: url.to_string(),
-                            tls: url.scheme() == "wss",
-                        };
-                        tags.insert(Box::new(tag));
+                        let mut count = self.link_count;
+                        if count == 0 {
+                            count = 1;
+                        }
+                        for i in 0..count {
+                            let mut show_name= std::str::from_utf8(&interface).unwrap().to_string();
+                            //show_name.push_str(& format!("_{}({})",i,addr.to_string()));
+                            show_name.push_str(& format!("_{}",i));
+                            
+                            let tag = OutgoingWebSocketLinkTag {
+                                interface: show_name.as_bytes().to_vec(),
+                                real_interface: interface.clone(),
+                                remote: addr,
+                                url: url.to_string(),
+                                tls: url.scheme() == "wss",
+                            };
+                            tags.insert(Box::new(tag));
+                        }
                     }
                 }
             }

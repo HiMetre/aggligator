@@ -270,7 +270,7 @@ impl ClientCli {
                 url
             });
             let mut ws_connector =
-                WebSocketConnector::new(websockets).await.context("cannot resolve WebSocket target")?;
+                WebSocketConnector::new(websockets, self.count).await.context("cannot resolve WebSocket target")?;
             ws_connector.set_ip_version(ip_version);
             targets.push(ws_connector.to_string());
             connector.add(ws_connector);
